@@ -1,0 +1,82 @@
+#!/bin/bash
+
+#dependences: make.input.tab.py (in the repository)
+
+#first step is manual: create folder 01TRIM where you paste all trimmed sequences for SNP analysis
+
+#snp analysis
+mkdir 02BWA
+mkdir 03BCF
+mkdir 04consensus_sequences
+mkdir 05SNIPPY-GUBBINS
+
+#reference indexing
+
+bwa index ./*_reference.fasta #rename you reference to end with _reference.fasta of adjust the script
+
+
+#-t 8 for defining threads
+#.sam is a file, that contains informations about reads mapping. We need to convert .sam file into .bam format. The bam file is written in binary format - saving space
+
+for file in $(ls ./01TRIM/*.fastq.gz | sed -r 's/_R[12]_P1.trim.fastq.gz//' | uniq); do
+    bwa mem -t 8 *_reference.fasta "${file}_R1_P1.trim.fastq.gz" "${file}_R2_P1.trim.fastq.gz" > "${file##*/}.sam"; 
+    samtools view -S -b "${file##*/}.sam" > "${file##*/}.bam" #-S means out input in in .sam format #-b is a command to write output file in .bam format
+    samtools sort "${file##*/}.bam" -o "${file##*/}.sorted.bam"    
+    rm "${file##*/}.bam"
+done
+
+
+mv *.sam 02BWA
+mv *.bam 02BWA
+mv *.sorted.bam 02BWA
+
+#indexing reference, but this time with samtools
+
+samtools faidx *_reference.fasta
+
+#spet, bcf je binarna oblika vcf, gre za prihranek prostora
+
+for file in ./02BWA/*sorted.bam; do
+    bcftools mpileup -f *_referenca.fasta $file > "${file##*/}".raw.bcf
+    bcftools call -O b -vc "${file##*/}".raw.bcf > "${file##*/}".var.bcf
+    bcftools view "${file##*/}".var.bcf | vcfutils.pl varFilter > "${file##*/}".var-final.vcf
+done
+
+#convert .bcf to .vcf with the same reason as above - to change file into binary format and save space
+
+mv *.raw.bcf 03BCF
+mv *.var.bcf 03BCF
+
+ 
+#making a consensus sequences 
+
+for file in ./*.var-final.vcf; do
+    bgzip $file
+    bcftools index "${file##*/}".gz
+    bcftools norm -f *_reference.fasta "${file##*/}".gz -Ob -o "${file##*/}".norm.bcf
+    bcftools filter --IndelGap 5 "${file##*/}".norm.bcf -Ob -o "${file##*/}".norm.fit-indels.bcf
+    cat *_reference.fasta | bcftools consensus "${file##*/}".gz > "${file##*/}".consensus
+    awk '/^>/ {gsub(".smalt.sorted.bam.vcf.filter.vcf.consensus","",FILENAME);printf(">%s\n",FILENAME);next;} {print}' "${file##*/}".consensus > "${file##*/}".consensus.fasta
+done
+
+mv *.consensus 03BCF
+mv *.vcf.gz.csi 03BCF
+mv *.vcf.gz 03BCF
+mv *.bcf 03BCF
+mv *.consensus.fasta 04consensus_sequences
+
+#time for snippy, a tool for extracting core genomes in all sequences
+
+python make.input.tab.py #naredi input.tab
+eval "$(conda shell.bash hook)" #I am using snippy in conda environment, so I made a hook that calls environment in the script. Otherwise it was not working
+conda activate snippy
+snippy-multi input.tab --ref *_reference.fasta --cpus 8 > runme.sh
+bash runme.sh
+
+#for homologous recombination detection we use gubbins
+
+run_gubbins core.aln
+
+mv core.* 05SNIPPY-GUBBINS
+
+
